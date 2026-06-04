@@ -10,6 +10,8 @@ Commands:
     brewster install-missing    — install packages from another machine
     brewster status             — show DB path, sync state, counts
     brewster config             — view/set config values
+    brewster export             — export DB to JSON
+    brewster import             — import DB from JSON
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from __future__ import annotations
 import json as _json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -780,3 +783,103 @@ def config_cmd(set_value: Optional[str], as_json: bool):
         for k, v in values.items():
             console.print(f"    {k} = [dim]{v}[/dim]")
         console.print()
+
+
+# ---------------------------------------------------------------------------
+# export
+# ---------------------------------------------------------------------------
+
+@cli.command("export")
+@_db_path_option
+@click.option("--output", "-o", default=None, metavar="FILE",
+              help="Write to FILE instead of stdout.")
+@click.option("--machine", "-m", default=None,
+              help="Export only this machine (label or hostname).")
+def export_db(db_path: Optional[str], output: Optional[str], machine: Optional[str]):
+    """Export the database to JSON."""
+    db = _open_db(db_path)
+
+    machine_id = None
+    if machine:
+        row = _resolve_machine(db, machine)
+        machine_id = row["id"]
+
+    machines = db.export_all(machine_id=machine_id)
+    db.close()
+
+    payload = {
+        "brewster_version": __version__,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "machines": machines,
+    }
+    json_str = _json.dumps(payload, indent=2)
+
+    if output:
+        out_path = Path(output).expanduser()
+        out_path.write_text(json_str)
+        console.print(
+            f"[green]✓[/green] Exported [bold]{len(machines)}[/bold] machine(s) "
+            f"to [dim]{out_path}[/dim]"
+        )
+    else:
+        click.echo(json_str)
+
+
+# ---------------------------------------------------------------------------
+# import
+# ---------------------------------------------------------------------------
+
+@cli.command("import")
+@_db_path_option
+@click.argument("file")
+@click.option("--dry-run", is_flag=True, help="Show what would be imported without writing.")
+def import_db(db_path: Optional[str], file: str, dry_run: bool):
+    """Import machines and packages from a JSON export file."""
+    src = Path(file).expanduser()
+    if not src.exists():
+        err_console.print(f"[red]✗[/red] File not found: [dim]{src}[/dim]")
+        sys.exit(1)
+
+    try:
+        payload = _json.loads(src.read_text())
+    except _json.JSONDecodeError as exc:
+        err_console.print(f"[red]✗[/red] Invalid JSON: {exc}")
+        sys.exit(1)
+
+    machines = payload.get("machines")
+    if not isinstance(machines, list):
+        err_console.print("[red]✗[/red] Invalid export file: missing 'machines' list.")
+        sys.exit(1)
+
+    if not machines:
+        console.print("[dim]Nothing to import — file contains no machines.[/dim]")
+        return
+
+    if dry_run:
+        console.print(f"[dim]Dry run — would import {len(machines)} machine(s):[/dim]")
+        for m in machines:
+            nf = len(m.get("formulae") or [])
+            nc = len(m.get("casks") or [])
+            console.print(f"  [bold]{m.get('label')}[/bold] ({m.get('hostname')}) "
+                          f"— {nf} formulae, {nc} casks")
+        return
+
+    db = _open_db(db_path)
+
+    # Warn about label collisions before writing anything.
+    for m in machines:
+        existing = db.get_machine_by_name(m.get("label", ""))
+        if existing and existing["hostname"] != m.get("hostname"):
+            err_console.print(
+                f"  [yellow]Warning:[/yellow] Label [bold]{m['label']!r}[/bold] is already "
+                f"used by [bold]{existing['hostname']}[/bold] — "
+                f"it will be reassigned to [bold]{m['hostname']}[/bold]."
+            )
+
+    count = db.import_machines(machines)
+    db.close()
+
+    console.print(
+        f"[green]✓[/green] Imported [bold]{count}[/bold] machine(s) "
+        f"from [dim]{src}[/dim]"
+    )

@@ -271,6 +271,48 @@ class BrewsterDB:
         ).fetchall()
 
     # ------------------------------------------------------------------
+    # Export / Import
+    # ------------------------------------------------------------------
+
+    def export_all(self, machine_id: Optional[int] = None) -> list[dict]:
+        """Return all machines (or one) with nested formulae and casks, internal IDs stripped."""
+        if machine_id is not None:
+            rows = [self.conn.execute("SELECT * FROM machines WHERE id = ?", (machine_id,)).fetchone()]
+        else:
+            rows = self.list_machines()
+        result = []
+        for m in rows:
+            if m is None:
+                continue
+            formulae = self.get_formulae(m["id"])
+            casks = self.get_casks(m["id"])
+            result.append({
+                "hostname": m["hostname"],
+                "label": m["label"],
+                "platform": m["platform"],
+                "macos_version": m["macos_version"],
+                "brew_prefix": m["brew_prefix"],
+                "last_seen": m["last_seen"],
+                "formulae": [{"name": r["name"], "version": r["version"], "tap": r["tap"]} for r in formulae],
+                "casks": [{"name": r["name"], "version": r["version"], "tap": r["tap"]} for r in casks],
+            })
+        return result
+
+    def import_machines(self, machines: list[dict]) -> int:
+        """Upsert each machine and replace its packages. Returns count of machines written."""
+        for m in machines:
+            mid = self.upsert_machine(
+                hostname=m["hostname"],
+                label=m["label"],
+                platform=m.get("platform") or "",
+                macos_version=m.get("macos_version"),
+                brew_prefix=m.get("brew_prefix"),
+            )
+            self.replace_formulae(mid, m.get("formulae") or [])
+            self.replace_casks(mid, m.get("casks") or [])
+        return len(machines)
+
+    # ------------------------------------------------------------------
     # Stats
     # ------------------------------------------------------------------
 

@@ -60,6 +60,8 @@ brewster install-missing work-mac
 | `brewster install-missing <SOURCE> [--dry-run] [-y]` | Install packages missing from SOURCE |
 | `brewster status` | DB path, sync state, row counts |
 | `brewster config [--set KEY=VALUE]` | View or set config |
+| `brewster export [-o FILE] [-m MACHINE]` | Export DB to JSON (stdout or file) |
+| `brewster import FILE [--dry-run]` | Import machines and packages from JSON |
 
 ## Sync Backends
 
