@@ -26,8 +26,8 @@ class Brewster < Formula
   depends_on "python@3.12"
 
   # ---------------------------------------------------------------------------
-  # PyPI resources
-  # Run `brew update-python-resources Formula/brewster.rb` to regenerate these.
+  # PyPI resources — update manually: get sdist URL + sha256 from PyPI JSON API
+  #   python3 -c "import urllib.request,json; d=json.loads(urllib.request.urlopen('https://pypi.org/pypi/PACKAGE/VERSION/json').read()); [print(f['url'],f['digests']['sha256']) for f in d['urls'] if f['packagetype']=='sdist']"
   # ---------------------------------------------------------------------------
 
   resource "click" do

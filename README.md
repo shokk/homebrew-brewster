@@ -78,13 +78,10 @@ Brewster stores everything in a single SQLite file. Point it at any location tha
 ## Auto-Sync on Login
 
 ```bash
-# Using Homebrew Services (recommended):
 brew services start brewster
-
-# Or install the launchd plist manually:
-cp $(brew --prefix)/share/brewster/sh.brew.brewster.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/sh.brew.brewster.plist
 ```
+
+This runs `brewster sync --quiet` once at login via Homebrew Services.
 
 ## Configuration
 
