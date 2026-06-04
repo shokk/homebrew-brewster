@@ -240,6 +240,24 @@ def init(label: Optional[str], db_path: Optional[str], yes: bool):
     # --- Open/init DB and register machine ---
     db = BrewsterDB(resolved_db_path)
     db.open()
+
+    # Warn if another machine already owns this label — duplicate labels break
+    # diff and install-missing (get_machine_by_name returns LIMIT 1).
+    existing = db.get_machine_by_name(resolved_label)
+    if existing and existing["hostname"] != machine.hostname:
+        err_console.print(
+            f"\n  [yellow]Warning:[/yellow] Label [bold]{resolved_label!r}[/bold] is already"
+            f" used by [bold]{existing['hostname']}[/bold].\n"
+            f"  Duplicate labels break [cyan]brewster diff[/cyan] and"
+            f" [cyan]brewster install-missing[/cyan].\n"
+            f"  Run [bold]brewster machines[/bold] to see all registered machines."
+        )
+        if not yes:
+            confirmed = Confirm.ask("  Use this label anyway?", default=False)
+            if not confirmed:
+                db.close()
+                sys.exit(1)
+
     machine_id = db.upsert_machine(
         hostname=machine.hostname,
         label=machine.label,
