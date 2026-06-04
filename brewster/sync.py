@@ -104,7 +104,7 @@ def _brew_info_json(names: list[str], kind: str = "formula") -> dict[str, dict]:
             data = json.loads(raw)
             key = "formulae" if kind == "formula" else "casks"
             for item in data.get(key, []):
-                name = item.get("name") or item.get("token")
+                name = item.get("token") if kind == "cask" else item.get("name")
                 if name:
                     result[name] = item
         except (RuntimeError, json.JSONDecodeError) as exc:
