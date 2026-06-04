@@ -17,7 +17,7 @@ class Brewster < Formula
   desc "Track and sync Homebrew packages across machines via iCloud or any shared filesystem"
   homepage "https://github.com/shokk/homebrew-brewster"
   url "https://github.com/shokk/homebrew-brewster/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "86a6487489d1161178590431644cc84a93989e10b0933cfd65bff24418431001"
+  sha256 "fc2825da67f40c4f0f02558891703c22accd36561e4bddc4780f53a197570781"
   license "MIT"
   head "https://github.com/shokk/homebrew-brewster.git", branch: "main"
 
