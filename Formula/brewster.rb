@@ -2,13 +2,14 @@
 #
 # Homebrew formula for Brewster.
 #
-# To update resource hashes after a new release:
-#   brew update-python-resources Formula/brewster.rb
+# To update resource hashes after a new release, find each package on PyPI,
+# grab the sdist URL and sha256 from the "Download files" tab, and update
+# the resource blocks below.
 #
-# To test locally before pushing:
-#   brew install --build-from-source Formula/brewster.rb
-#   brew test brewster
-#   brew audit --strict Formula/brewster.rb
+# To test locally after tapping (brew tap shokk/brewster):
+#   brew install --build-from-source shokk/brewster/brewster
+#   brew test shokk/brewster/brewster
+#   brew audit --strict --online shokk/brewster/brewster
 
 class Brewster < Formula
   include Language::Python::Virtualenv
@@ -35,8 +36,8 @@ class Brewster < Formula
   end
 
   resource "rich" do
-    url "https://files.pythonhosted.org/packages/a7/ec/4a7d80728bd429f7c0d4d51245287158a1516315cadbb146012439a8b01c/rich-13.7.1.tar.gz"
-    sha256 "9be308cb1fe2f1f57d67ce99e95af38a1e2bc71ad9813b0e247cf7ffbcc3a432"
+    url "https://files.pythonhosted.org/packages/c0/8f/0722ca900cc807c13a6a0c696dacf35430f72e0ec571c4275d2371fca3e9/rich-15.0.0.tar.gz"
+    sha256 "edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36"
   end
 
   # rich dependencies
@@ -51,8 +52,8 @@ class Brewster < Formula
   end
 
   resource "pygments" do
-    url "https://files.pythonhosted.org/packages/8e/62/8336eff65bcbc8e4cb5d05b55faf041285951b6e80f33e2bff2024788f31/pygments-2.17.2.tar.gz"
-    sha256 "da46cec9fd2de5be3a8a784f434e4c4ab670b4ff54d605c4c2717e9d49c4c367"
+    url "https://files.pythonhosted.org/packages/c3/b2/bc9c9196916376152d655522fdcebac55e66de6603a76a02bca1b6414f6c/pygments-2.20.0.tar.gz"
+    sha256 "6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f"
   end
 
   def install
