@@ -65,15 +65,26 @@ brewster install-missing work-mac
 
 ## Sync Backends
 
-Brewster stores everything in a single SQLite file. Point it at any location that syncs across your machines:
+Brewster creates a `databases/` folder inside a sync root you choose. Each machine writes its own `.db` file — no shared file, no conflicts.
 
-| Backend | Default path |
+| Backend | Default sync root |
 |---|---|
-| iCloud Drive | `~/Library/Mobile Documents/com~apple~CloudDocs/Brewster/brewster.db` |
-| Dropbox | `~/Dropbox/Brewster/brewster.db` |
-| Google Drive | `~/Library/CloudStorage/GoogleDrive-.../My Drive/Brewster/brewster.db` |
-| OneDrive | `~/OneDrive/Brewster/brewster.db` |
-| Custom / NAS | Any path via `--db-path` or `brewster config --set database.path=...` |
+| iCloud Drive | `~/Library/Mobile Documents/com~apple~CloudDocs/Brewster/` |
+| Dropbox | `~/Dropbox/Brewster/` |
+| Google Drive | `~/Library/CloudStorage/GoogleDrive-.../My Drive/Brewster/` |
+| OneDrive | `~/OneDrive/Brewster/` |
+| Custom / NAS | Any directory via `--db-path` or `brewster config --set database.path=...` |
+
+The resulting layout:
+```
+Brewster/
+  databases/
+    work-mac.db
+    home-mac.db
+  logs/
+    work-mac.log
+    home-mac.log
+```
 
 `brewster init` detects which providers are installed and lets you choose interactively.
 
@@ -85,6 +96,15 @@ brew services start brewster
 
 This runs `brewster sync --quiet` once at login via Homebrew Services.
 
+
+## How It Works
+
+- Each machine runs `brewster sync`, which calls `brew list --versions` + `brew list --cask --versions` and writes to its own `databases/{hostname}.db` file.
+- Because each machine owns exactly one file, there are no write conflicts — even if multiple machines sync simultaneously.
+- WAL journal mode is enabled with a full checkpoint on every close, so no `-wal`/`-shm` sidecar files are left for the sync provider to mishandle.
+- `brewster diff` and `brewster install-missing` read individual machine DB files — they work as long as your sync provider has delivered the latest versions.
+- Every mutating command (`init`, `sync`, `install-missing`, `import`) appends a line to `logs/{hostname}.log` in the sync root.
+
 ## Configuration
 
 Config lives at `~/.config/brewster/config.toml`:
@@ -94,29 +114,10 @@ Config lives at `~/.config/brewster/config.toml`:
 label = "work-mac"
 
 [database]
-path = "~/Library/Mobile Documents/com~apple~CloudDocs/Brewster/brewster.db"
+path = "~/Library/Mobile Documents/com~apple~CloudDocs/Brewster"
 ```
 
-Override the DB path for a single command with `--db-path PATH` or `BREWSTER_DB_PATH` env var.
-
-## How It Works
-
-- Each machine runs `brewster sync`, which calls `brew list --versions` + `brew list --cask --versions` and writes the results to the SQLite DB.
-- The DB file is stored in your cloud sync folder. Each machine writes only its own rows (scoped by hostname), so concurrent writes are safe.
-- WAL journal mode is enabled so interrupted syncs don't corrupt the file. The WAL is fully checkpointed on every close so no sidecar `-wal`/`-shm` files are left for the sync provider to mishandle.
-- `brewster diff` and `brewster install-missing` read the DB directly — they work as long as your sync provider has delivered the latest version.
-
-## Cloud Sync Conflict Files
-
-If two machines sync at almost exactly the same time before iCloud (or Dropbox, etc.) has delivered the latest DB, the sync provider may create a conflict copy — e.g. `brewster (MacBook's conflicted copy).db`. Brewster won't see this file automatically.
-
-If you notice a machine's data is missing after a sync, check your sync folder for conflict copies and recover with:
-
-```bash
-brewster import ~/Library/Mobile\ Documents/com~apple~CloudDocs/Brewster/"brewster (MacBook's conflicted copy).db"
-```
-
-This merges the conflict copy's data into your live DB. In practice this is rare — it only occurs if both machines happen to sync within the same narrow window before the provider delivers the updated file.
+Override the sync root for a single command with `--db-path DIR` or `BREWSTER_DB_PATH` env var.
 
 ## License
 

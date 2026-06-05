@@ -66,6 +66,69 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# ---------------------------------------------------------------------------
+# Per-machine DB helpers (used by CLI to locate individual DB files)
+# ---------------------------------------------------------------------------
+
+def db_path_for_machine(databases_dir: Path, hostname: str) -> Path:
+    return databases_dir / f"{hostname}.db"
+
+
+def find_machine_db(
+    databases_dir: Path, name: str
+) -> "tuple[Optional[BrewsterDB], Optional[sqlite3.Row]]":
+    """
+    Find a machine's DB by label or hostname.
+    Tries {name}.db first (hostname match), then scans all .db files for a
+    label match. Returns (db, machine_row) with db already open, or (None, None).
+    """
+    # Fast path: exact hostname match
+    candidate = databases_dir / f"{name}.db"
+    if candidate.exists():
+        db = BrewsterDB(candidate)
+        db.open()
+        rows = db.list_machines()
+        if rows:
+            return db, rows[0]
+        db.close()
+
+    # Scan for label match
+    if databases_dir.exists():
+        for db_file in sorted(databases_dir.glob("*.db")):
+            if db_file == candidate:
+                continue
+            try:
+                db = BrewsterDB(db_file)
+                db.open()
+                rows = db.list_machines()
+                if rows and rows[0]["label"] == name:
+                    return db, rows[0]
+                db.close()
+            except Exception:
+                pass
+
+    return None, None
+
+
+def iter_all_machines(
+    databases_dir: Path,
+) -> "Generator[tuple[BrewsterDB, sqlite3.Row], None, None]":
+    """Yield (db, machine_row) for every .db file in databases_dir."""
+    if not databases_dir.exists():
+        return
+    for db_file in sorted(databases_dir.glob("*.db")):
+        try:
+            db = BrewsterDB(db_file)
+            db.open()
+            rows = db.list_machines()
+            if rows:
+                yield db, rows[0]
+            else:
+                db.close()
+        except Exception as exc:
+            log.debug("Skipping %s: %s", db_file, exc)
+
+
 class BrewsterDB:
     """
     Thin wrapper around a sqlite3 connection.

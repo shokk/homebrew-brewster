@@ -10,8 +10,8 @@ Commands:
     brewster install-missing    — install packages from another machine
     brewster status             — show DB path, sync state, counts
     brewster config             — view/set config values
-    brewster export             — export DB to JSON
-    brewster import             — import DB from JSON
+    brewster export             — export all machine DBs to JSON
+    brewster import             — import machines and packages from JSON
 """
 
 from __future__ import annotations
@@ -37,13 +37,20 @@ from .config import (
     load_config,
     save_config,
     get_label,
-    get_db_path,
+    get_sync_root,
+    get_databases_dir,
+    get_logs_dir,
     set_label,
-    set_db_path,
+    set_sync_root,
     detect_sync_backends,
     CONFIG_FILE,
 )
-from .db import BrewsterDB
+from .db import (
+    BrewsterDB,
+    db_path_for_machine,
+    find_machine_db,
+    iter_all_machines,
+)
 from .diff import compute_diff, DiffResult, PackageRow
 from .installer import install_packages
 from .machine import MachineInfo, assert_brew_available
@@ -65,44 +72,52 @@ def _db_path_option(f):
     return click.option(
         "--db-path",
         default=None,
-        metavar="PATH",
-        help="Override the DB file path (e.g. ~/Dropbox/Brewster/brewster.db).",
+        metavar="DIR",
+        help="Override the sync directory (parent of databases/ and logs/).",
         envvar="BREWSTER_DB_PATH",
     )(f)
 
 
-def _open_db(db_path_override: Optional[str]) -> BrewsterDB:
-    path = get_db_path(cli_override=db_path_override)
-    db = BrewsterDB(path)
-    db.open()
-    return db
+def _setup_file_logging(logs_dir: Path, hostname: str) -> None:
+    """Add a per-machine file handler to the root brewster logger."""
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(logs_dir / f"{hostname}.log", encoding="utf-8")
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)-8s %(message)s")
+        )
+        logger = logging.getLogger("brewster")
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+    except OSError as exc:
+        log.debug("Could not set up file logging: %s", exc)
 
 
-def _resolve_machine(db: BrewsterDB, name: str):
-    """Resolve machine by label or hostname. Exit with message if not found."""
-    machine = db.get_machine_by_name(name)
-    if not machine:
+def _resolve_machine_db(
+    databases_dir: Path, name: str
+) -> tuple[BrewsterDB, object]:
+    """Find a machine's DB by label or hostname. Exit with message if not found."""
+    db, row = find_machine_db(databases_dir, name)
+    if db is None:
         err_console.print(
-            f"[red]✗[/red] Machine [bold]{name!r}[/bold] not found in DB. "
+            f"[red]✗[/red] Machine [bold]{name!r}[/bold] not found. "
             f"Run [bold]brewster machines[/bold] to list known machines."
         )
         sys.exit(1)
-    return machine
+    return db, row
 
 
 def _render_diff_section(diff: DiffResult, show_versions: bool = False) -> None:
-    """Render a rich table for one DiffResult (formulae or casks)."""
     kind_label = diff.kind.capitalize()
     total_common = len(diff.common) + len(diff.version_diff)
 
-    # Nothing to show
     if not diff.has_differences:
         console.print(
             f"  [dim]{kind_label}: {total_common} in common, no differences.[/dim]"
         )
         return
 
-    # Side-by-side "only on X / only on Y" table
     if diff.only_a or diff.only_b:
         table = Table(
             box=box.SIMPLE_HEAD,
@@ -127,10 +142,8 @@ def _render_diff_section(diff: DiffResult, show_versions: bool = False) -> None:
                 pb.name if pb else "",
                 pb.version if pb else "",
             )
-
         console.print(table)
 
-    # Version mismatch table
     if show_versions and diff.version_diff:
         vtable = Table(
             box=box.SIMPLE_HEAD,
@@ -158,6 +171,9 @@ def _render_diff_section(diff: DiffResult, show_versions: bool = False) -> None:
     console.print("  " + "  ·  ".join(summary_parts))
 
 
+log = logging.getLogger(__name__)
+
+
 # ---------------------------------------------------------------------------
 # CLI group
 # ---------------------------------------------------------------------------
@@ -175,7 +191,8 @@ def cli():
 
 @cli.command()
 @click.option("--label", default=None, help="Friendly name for this machine.")
-@click.option("--db-path", default=None, metavar="PATH", help="Path to the Brewster DB file.")
+@click.option("--db-path", default=None, metavar="DIR",
+              help="Sync root directory (will contain databases/ and logs/).")
 @click.option("--yes", "-y", is_flag=True, help="Accept all defaults without prompting.")
 def init(label: Optional[str], db_path: Optional[str], yes: bool):
     """First-time setup: register this machine and choose a sync backend."""
@@ -192,22 +209,19 @@ def init(label: Optional[str], db_path: Optional[str], yes: bool):
         if yes:
             resolved_label = current_label
         else:
-            resolved_label = Prompt.ask(
-                "  Machine label",
-                default=current_label,
-            )
+            resolved_label = Prompt.ask("  Machine label", default=current_label)
     else:
         resolved_label = label
 
     machine.label = resolved_label
 
-    # --- DB path ---
+    # --- Sync root ---
     if db_path:
-        resolved_db_path = Path(db_path).expanduser()
+        resolved_root = Path(db_path).expanduser()
     else:
-        configured_path = get_db_path(config=cfg)
+        configured_root = get_sync_root(config=cfg)
         if yes:
-            resolved_db_path = configured_path
+            resolved_root = configured_root
         else:
             backends = detect_sync_backends()
             available = [b for b in backends if b["available"]]
@@ -217,10 +231,7 @@ def init(label: Optional[str], db_path: Optional[str], yes: bool):
                 marker = " [green]✓[/green]" if b["key"] != "custom" else ""
                 console.print(f"    [{i}] {b['name']}{marker}")
 
-            choice_str = Prompt.ask(
-                "  Select sync backend",
-                default="1",
-            )
+            choice_str = Prompt.ask("  Select sync backend", default="1")
             try:
                 choice_idx = int(choice_str) - 1
                 chosen = available[choice_idx]
@@ -229,25 +240,31 @@ def init(label: Optional[str], db_path: Optional[str], yes: bool):
                 sys.exit(1)
 
             if chosen["key"] == "custom":
-                custom_path = Prompt.ask("  Enter full DB path")
-                resolved_db_path = Path(custom_path).expanduser()
+                custom_path = Prompt.ask("  Enter sync directory path")
+                resolved_root = Path(custom_path).expanduser()
             else:
-                resolved_db_path = chosen["path"]
-                console.print(f"  [dim]DB path: {resolved_db_path}[/dim]")
+                resolved_root = chosen["path"]
+                console.print(f"  [dim]Sync root: {resolved_root}[/dim]")
+
+    databases_dir = resolved_root / "databases"
+    logs_dir = resolved_root / "logs"
 
     # --- Save config ---
     cfg.setdefault("machine", {})["label"] = resolved_label
-    cfg.setdefault("database", {})["path"] = str(resolved_db_path)
+    cfg.setdefault("database", {})["path"] = str(resolved_root)
     save_config(cfg)
 
     # --- Open/init DB and register machine ---
-    db = BrewsterDB(resolved_db_path)
+    databases_dir.mkdir(parents=True, exist_ok=True)
+    db_file = db_path_for_machine(databases_dir, machine.hostname)
+    db = BrewsterDB(db_file)
     db.open()
 
-    # Warn if another machine already owns this label — duplicate labels break
-    # diff and install-missing (get_machine_by_name returns LIMIT 1).
-    existing = db.get_machine_by_name(resolved_label)
+    # Warn if another machine already owns this label.
+    existing_db, existing = find_machine_db(databases_dir, resolved_label)
     if existing and existing["hostname"] != machine.hostname:
+        if existing_db:
+            existing_db.close()
         err_console.print(
             f"\n  [yellow]Warning:[/yellow] Label [bold]{resolved_label!r}[/bold] is already"
             f" used by [bold]{existing['hostname']}[/bold].\n"
@@ -270,9 +287,13 @@ def init(label: Optional[str], db_path: Optional[str], yes: bool):
     )
     db.close()
 
+    _setup_file_logging(logs_dir, machine.hostname)
+    log.info("init: registered %s (%s), db=%s", machine.label, machine.hostname, db_file)
+
     console.print()
     console.print(f"  [green]✓[/green] Registered [bold]{machine.label}[/bold] ({machine.hostname})")
-    console.print(f"  [green]✓[/green] DB: [dim]{resolved_db_path}[/dim]")
+    console.print(f"  [green]✓[/green] Databases: [dim]{databases_dir}[/dim]")
+    console.print(f"  [green]✓[/green] Logs:      [dim]{logs_dir}[/dim]")
     console.print()
     console.print("  Run [bold cyan]brewster sync[/bold cyan] to snapshot your packages.")
 
@@ -295,7 +316,14 @@ def sync(db_path: Optional[str], quiet: bool, no_taps: bool):
     label = get_label(cfg)
     machine = MachineInfo(label=label)
 
-    db = _open_db(db_path)
+    databases_dir = get_databases_dir(config=cfg, cli_override=db_path)
+    logs_dir = get_logs_dir(config=cfg, cli_override=db_path)
+
+    _setup_file_logging(logs_dir, machine.hostname)
+
+    databases_dir.mkdir(parents=True, exist_ok=True)
+    db = BrewsterDB(db_path_for_machine(databases_dir, machine.hostname))
+    db.open()
 
     machine_id = db.upsert_machine(
         hostname=machine.hostname,
@@ -317,6 +345,11 @@ def sync(db_path: Optional[str], quiet: bool, no_taps: bool):
     summary = sync_to_db(db, machine_id, quiet=quiet, resolve_taps=resolve_taps)
     db.close()
 
+    log.info(
+        "sync: %s (%s) — %d formulae, %d casks",
+        machine.label, machine.hostname, summary["formulae"], summary["casks"],
+    )
+
     if not quiet:
         console.print(
             f"[green]✓[/green] Synced "
@@ -333,10 +366,10 @@ def sync(db_path: Optional[str], quiet: bool, no_taps: bool):
 @_db_path_option
 def machines(db_path: Optional[str]):
     """List all registered machines and their last sync time."""
-    db = _open_db(db_path)
-    rows = db.list_machines()
-    db.close()
+    cfg = load_config()
+    databases_dir = get_databases_dir(config=cfg, cli_override=db_path)
 
+    rows = list(iter_all_machines(databases_dir))
     if not rows:
         console.print("[dim]No machines registered yet. Run [bold]brewster init[/bold].[/dim]")
         return
@@ -349,7 +382,7 @@ def machines(db_path: Optional[str]):
     table.add_column("Brew Prefix", style="dim")
     table.add_column("Last Sync")
 
-    for r in rows:
+    for db, r in rows:
         last_seen = r["last_seen"][:19].replace("T", " ") if r["last_seen"] else "—"
         table.add_row(
             r["label"],
@@ -359,6 +392,7 @@ def machines(db_path: Optional[str]):
             r["brew_prefix"] or "—",
             last_seen,
         )
+        db.close()
 
     console.print(table)
 
@@ -369,10 +403,11 @@ def machines(db_path: Optional[str]):
 
 @cli.command("list")
 @_db_path_option
-@click.option("--machine", "-m", default=None, help="Machine label or hostname (default: this machine).")
-@click.option("--formulae", "kind", flag_value="formulae", default=True, help="Show formulae (default).")
-@click.option("--casks", "kind", flag_value="casks", help="Show casks.")
-@click.option("--all", "kind", flag_value="all", help="Show formulae and casks.")
+@click.option("--machine", "-m", default=None,
+              help="Machine label or hostname (default: this machine).")
+@click.option("--formulae", "kind", flag_value="formulae", default=True)
+@click.option("--casks", "kind", flag_value="casks")
+@click.option("--all", "kind", flag_value="all")
 @click.option("--tap", default=None, help="Filter by tap name.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
 def list_packages(
@@ -384,21 +419,19 @@ def list_packages(
 ):
     """List installed packages for a machine."""
     cfg = load_config()
-    db = _open_db(db_path)
+    databases_dir = get_databases_dir(config=cfg, cli_override=db_path)
 
     if machine:
-        machine_row = _resolve_machine(db, machine)
+        db, machine_row = _resolve_machine_db(databases_dir, machine)
     else:
-        # Default to this machine
         label = get_label(cfg)
         hostname = MachineInfo().hostname
-        machine_row = db.get_machine_by_name(label or hostname)
-        if not machine_row:
+        db, machine_row = find_machine_db(databases_dir, label or hostname)
+        if db is None:
             err_console.print(
                 "[red]✗[/red] This machine hasn't been synced yet. "
                 "Run [bold]brewster sync[/bold] first."
             )
-            db.close()
             sys.exit(1)
 
     machine_id = machine_row["id"]
@@ -408,7 +441,6 @@ def list_packages(
     casks_rows = db.get_casks(machine_id) if kind in ("casks", "all") else []
     db.close()
 
-    # Filter by tap
     if tap:
         formulae_rows = [r for r in formulae_rows if r["tap"] == tap]
         casks_rows = [r for r in casks_rows if r["tap"] == tap]
@@ -453,8 +485,8 @@ def list_packages(
 @_db_path_option
 @click.argument("machine_a")
 @click.argument("machine_b")
-@click.option("--formulae/--no-formulae", default=True, show_default=True, help="Include formulae in diff.")
-@click.option("--casks/--no-casks", default=True, show_default=True, help="Include casks in diff.")
+@click.option("--formulae/--no-formulae", default=True, show_default=True)
+@click.option("--casks/--no-casks", default=True, show_default=True)
 @click.option("--versions", is_flag=True, help="Show version mismatches for common packages.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
 def diff(
@@ -467,10 +499,11 @@ def diff(
     as_json: bool,
 ):
     """Show package differences between two machines."""
-    db = _open_db(db_path)
+    cfg = load_config()
+    databases_dir = get_databases_dir(config=cfg, cli_override=db_path)
 
-    row_a = _resolve_machine(db, machine_a)
-    row_b = _resolve_machine(db, machine_b)
+    db_a, row_a = _resolve_machine_db(databases_dir, machine_a)
+    db_b, row_b = _resolve_machine_db(databases_dir, machine_b)
 
     label_a = row_a["label"]
     label_b = row_b["label"]
@@ -479,16 +512,17 @@ def diff(
     cask_diff = None
 
     if formulae:
-        fa = db.get_formulae(row_a["id"])
-        fb = db.get_formulae(row_b["id"])
+        fa = db_a.get_formulae(row_a["id"])
+        fb = db_b.get_formulae(row_b["id"])
         formula_diff = compute_diff(label_a, label_b, fa, fb, kind="formulae")
 
     if casks:
-        ca = db.get_casks(row_a["id"])
-        cb = db.get_casks(row_b["id"])
+        ca = db_a.get_casks(row_a["id"])
+        cb = db_b.get_casks(row_b["id"])
         cask_diff = compute_diff(label_a, label_b, ca, cb, kind="casks")
 
-    db.close()
+    db_a.close()
+    db_b.close()
 
     if as_json:
         def _diff_to_dict(d: DiffResult) -> dict:
@@ -502,10 +536,7 @@ def diff(
                     for pa, pb in d.version_diff
                 ],
             }
-        out = {
-            "machine_a": label_a,
-            "machine_b": label_b,
-        }
+        out = {"machine_a": label_a, "machine_b": label_b}
         if formula_diff:
             out["formulae"] = _diff_to_dict(formula_diff)
         if cask_diff:
@@ -513,7 +544,6 @@ def diff(
         click.echo(_json.dumps(out, indent=2))
         return
 
-    # Rich output
     console.print()
     console.print(
         Panel.fit(
@@ -532,7 +562,6 @@ def diff(
         _render_diff_section(cask_diff, show_versions=versions)
         console.print()
 
-    # Tip: if there are differences, point to install-missing
     any_diff = (formula_diff and formula_diff.has_differences) or (
         cask_diff and cask_diff.has_differences
     )
@@ -552,8 +581,8 @@ def diff(
 @click.argument("source_machine")
 @click.option("--formulae/--no-formulae", default=True, show_default=True)
 @click.option("--casks/--no-casks", default=True, show_default=True)
-@click.option("--dry-run", is_flag=True, help="Show what would be installed without installing.")
-@click.option("--yes", "-y", is_flag=True, help="Install all missing packages without prompting.")
+@click.option("--dry-run", is_flag=True)
+@click.option("--yes", "-y", is_flag=True)
 def install_missing(
     db_path: Optional[str],
     source_machine: str,
@@ -566,40 +595,42 @@ def install_missing(
     assert_brew_available()
 
     cfg = load_config()
-    db = _open_db(db_path)
+    databases_dir = get_databases_dir(config=cfg, cli_override=db_path)
+    logs_dir = get_logs_dir(config=cfg, cli_override=db_path)
 
-    source_row = _resolve_machine(db, source_machine)
+    db_source, source_row = _resolve_machine_db(databases_dir, source_machine)
 
-    # Identify this machine
-    label = get_label(cfg)
     hostname = MachineInfo().hostname
-    this_row = db.get_machine_by_name(label or hostname)
-    if not this_row:
+    label = get_label(cfg)
+    db_this, this_row = find_machine_db(databases_dir, label or hostname)
+    if db_this is None:
         err_console.print(
             "[red]✗[/red] This machine hasn't been synced yet. "
             "Run [bold]brewster sync[/bold] first."
         )
-        db.close()
+        db_source.close()
         sys.exit(1)
 
-    this_label = this_row["label"]
-    source_label = source_row["label"]
+    _setup_file_logging(logs_dir, hostname)
 
-    # Compute diff
+    source_label = source_row["label"]
+    this_label = this_row["label"]
+
     formula_diff = None
     cask_diff = None
 
     if formulae:
-        fa = db.get_formulae(source_row["id"])
-        fb = db.get_formulae(this_row["id"])
+        fa = db_source.get_formulae(source_row["id"])
+        fb = db_this.get_formulae(this_row["id"])
         formula_diff = compute_diff(source_label, this_label, fa, fb, kind="formulae")
 
     if casks:
-        ca = db.get_casks(source_row["id"])
-        cb = db.get_casks(this_row["id"])
+        ca = db_source.get_casks(source_row["id"])
+        cb = db_this.get_casks(this_row["id"])
         cask_diff = compute_diff(source_label, this_label, ca, cb, kind="casks")
 
-    db.close()
+    db_source.close()
+    db_this.close()
 
     missing_formulae: list[PackageRow] = formula_diff.missing_on_b() if formula_diff else []
     missing_casks: list[PackageRow] = cask_diff.missing_on_b() if cask_diff else []
@@ -611,7 +642,6 @@ def install_missing(
         )
         return
 
-    # Display what's missing
     console.print()
     console.print(
         Panel.fit(
@@ -656,7 +686,6 @@ def install_missing(
             console.print("[dim]Aborted.[/dim]")
             return
 
-    # Install with progress feedback
     def _on_progress(name, cask, success, error, dry_run):
         kind = "cask" if cask else "formula"
         if success:
@@ -669,6 +698,13 @@ def install_missing(
         missing_casks,
         dry_run=False,
         progress_callback=_on_progress,
+    )
+
+    installed_names = [n for n, _ in result.succeeded] if hasattr(result, "succeeded") else []
+    log.info(
+        "install-missing: installed %d package(s) from %s: %s",
+        len(result.succeeded), source_label,
+        ", ".join(n for n, _ in result.succeeded) or "none",
     )
 
     console.print()
@@ -691,43 +727,52 @@ def install_missing(
 @cli.command()
 @_db_path_option
 def status(db_path: Optional[str]):
-    """Show DB path, sync state, and row counts."""
+    """Show sync directory, machine DBs found, and row counts."""
     cfg = load_config()
-    resolved_path = get_db_path(cli_override=db_path)
+    sync_root = get_sync_root(config=cfg, cli_override=db_path)
+    databases_dir = sync_root / "databases"
+    logs_dir = sync_root / "logs"
 
     console.print()
     console.print(Panel.fit("[bold cyan]Brewster Status[/bold cyan]", border_style="cyan"))
     console.print()
 
     console.print(f"  Config file:   [dim]{CONFIG_FILE}[/dim]")
-    console.print(f"  DB path:       [dim]{resolved_path}[/dim]")
+    console.print(f"  Sync root:     [dim]{sync_root}[/dim]")
+    console.print(f"  Databases:     [dim]{databases_dir}[/dim]")
+    console.print(f"  Logs:          [dim]{logs_dir}[/dim]")
 
-    if not resolved_path.exists():
-        console.print(f"  DB exists:     [red]No[/red] — run [bold]brewster init[/bold]")
+    if not databases_dir.exists():
+        console.print(f"\n  [red]Databases directory not found.[/red] Run [bold]brewster init[/bold].")
         return
 
-    db = _open_db(db_path)
-    stats = db.stats()
-    machines = db.list_machines()
-    db.close()
+    all_machines = list(iter_all_machines(databases_dir))
+    if not all_machines:
+        console.print("\n  [dim]No machines registered yet.[/dim]")
+        return
 
-    console.print(f"  DB size:       [dim]{resolved_path.stat().st_size / 1024:.1f} KB[/dim]")
+    hostname = MachineInfo().hostname
+    total_f = total_c = 0
+
     console.print()
-    console.print(f"  Machines:      [bold]{stats['machines']}[/bold]")
-    console.print(f"  Formulae:      [bold]{stats['formulae']}[/bold]")
-    console.print(f"  Casks:         [bold]{stats['casks']}[/bold]")
+    console.print("  [bold]Machines:[/bold]")
+    for db, m in all_machines:
+        stats = db.stats()
+        total_f += stats["formulae"]
+        total_c += stats["casks"]
+        is_this = m["hostname"] == hostname
+        marker = " [cyan]← this machine[/cyan]" if is_this else ""
+        last = m["last_seen"][:10] if m["last_seen"] else "never"
+        console.print(
+            f"    [bold]{m['label']}[/bold] ({m['hostname']}) "
+            f"— {stats['formulae']} formulae, {stats['casks']} casks "
+            f"— last sync {last}{marker}"
+        )
+        db.close()
 
-    if machines:
-        console.print()
-        label = get_label(cfg)
-        hostname = MachineInfo().hostname
-        console.print("  [bold]Machines:[/bold]")
-        for m in machines:
-            is_this = m["hostname"] == hostname
-            marker = " [cyan]← this machine[/cyan]" if is_this else ""
-            last = m["last_seen"][:10] if m["last_seen"] else "never"
-            console.print(f"    [bold]{m['label']}[/bold] ({m['hostname']}) — last sync {last}{marker}")
-
+    console.print()
+    console.print(f"  Total formulae: [bold]{total_f}[/bold]")
+    console.print(f"  Total casks:    [bold]{total_c}[/bold]")
     console.print()
 
 
@@ -744,7 +789,7 @@ def config_cmd(set_value: Optional[str], as_json: bool):
     \b
     Keys:
       machine.label     — friendly name for this machine
-      database.path     — path to the Brewster DB file
+      database.path     — sync root directory path
     """
     if set_value:
         if "=" not in set_value:
@@ -757,7 +802,7 @@ def config_cmd(set_value: Optional[str], as_json: bool):
             set_label(value)
             console.print(f"[green]✓[/green] Set [bold]machine.label[/bold] = [bold]{value}[/bold]")
         elif key == "database.path":
-            set_db_path(value)
+            set_sync_root(value)
             console.print(f"[green]✓[/green] Set [bold]database.path[/bold] = [bold]{value}[/bold]")
         else:
             err_console.print(f"[red]✗[/red] Unknown key [bold]{key!r}[/bold].")
@@ -796,21 +841,36 @@ def config_cmd(set_value: Optional[str], as_json: bool):
 @click.option("--machine", "-m", default=None,
               help="Export only this machine (label or hostname).")
 def export_db(db_path: Optional[str], output: Optional[str], machine: Optional[str]):
-    """Export the database to JSON."""
-    db = _open_db(db_path)
+    """Export all machine databases to a single JSON file."""
+    cfg = load_config()
+    databases_dir = get_databases_dir(config=cfg, cli_override=db_path)
 
-    machine_id = None
     if machine:
-        row = _resolve_machine(db, machine)
-        machine_id = row["id"]
+        db, row = _resolve_machine_db(databases_dir, machine)
+        sources = [(db, row)]
+    else:
+        sources = list(iter_all_machines(databases_dir))
 
-    machines = db.export_all(machine_id=machine_id)
-    db.close()
+    machines_out = []
+    for db, row in sources:
+        formulae = db.get_formulae(row["id"])
+        casks = db.get_casks(row["id"])
+        machines_out.append({
+            "hostname": row["hostname"],
+            "label": row["label"],
+            "platform": row["platform"],
+            "macos_version": row["macos_version"],
+            "brew_prefix": row["brew_prefix"],
+            "last_seen": row["last_seen"],
+            "formulae": [{"name": r["name"], "version": r["version"], "tap": r["tap"]} for r in formulae],
+            "casks": [{"name": r["name"], "version": r["version"], "tap": r["tap"]} for r in casks],
+        })
+        db.close()
 
     payload = {
         "brewster_version": __version__,
         "exported_at": datetime.now(timezone.utc).isoformat(),
-        "machines": machines,
+        "machines": machines_out,
     }
     json_str = _json.dumps(payload, indent=2)
 
@@ -818,7 +878,7 @@ def export_db(db_path: Optional[str], output: Optional[str], machine: Optional[s
         out_path = Path(output).expanduser()
         out_path.write_text(json_str)
         console.print(
-            f"[green]✓[/green] Exported [bold]{len(machines)}[/bold] machine(s) "
+            f"[green]✓[/green] Exported [bold]{len(machines_out)}[/bold] machine(s) "
             f"to [dim]{out_path}[/dim]"
         )
     else:
@@ -860,26 +920,48 @@ def import_db(db_path: Optional[str], file: str, dry_run: bool):
         for m in machines:
             nf = len(m.get("formulae") or [])
             nc = len(m.get("casks") or [])
-            console.print(f"  [bold]{m.get('label')}[/bold] ({m.get('hostname')}) "
-                          f"— {nf} formulae, {nc} casks")
+            console.print(
+                f"  [bold]{m.get('label')}[/bold] ({m.get('hostname')}) "
+                f"— {nf} formulae, {nc} casks"
+            )
         return
 
-    db = _open_db(db_path)
+    cfg = load_config()
+    databases_dir = get_databases_dir(config=cfg, cli_override=db_path)
+    logs_dir = get_logs_dir(config=cfg, cli_override=db_path)
+    databases_dir.mkdir(parents=True, exist_ok=True)
 
-    # Warn about label collisions before writing anything.
+    hostname = MachineInfo().hostname
+    _setup_file_logging(logs_dir, hostname)
+
     for m in machines:
-        existing = db.get_machine_by_name(m.get("label", ""))
+        # Warn about label collisions with a different hostname.
+        existing_db, existing = find_machine_db(databases_dir, m.get("label", ""))
         if existing and existing["hostname"] != m.get("hostname"):
             err_console.print(
                 f"  [yellow]Warning:[/yellow] Label [bold]{m['label']!r}[/bold] is already "
                 f"used by [bold]{existing['hostname']}[/bold] — "
                 f"it will be reassigned to [bold]{m['hostname']}[/bold]."
             )
+        if existing_db:
+            existing_db.close()
 
-    count = db.import_machines(machines)
-    db.close()
+        db_file = db_path_for_machine(databases_dir, m["hostname"])
+        db = BrewsterDB(db_file)
+        db.open()
+        mid = db.upsert_machine(
+            hostname=m["hostname"],
+            label=m["label"],
+            platform=m.get("platform") or "",
+            macos_version=m.get("macos_version"),
+            brew_prefix=m.get("brew_prefix"),
+        )
+        db.replace_formulae(mid, m.get("formulae") or [])
+        db.replace_casks(mid, m.get("casks") or [])
+        db.close()
 
+    log.info("import: imported %d machine(s) from %s", len(machines), src)
     console.print(
-        f"[green]✓[/green] Imported [bold]{count}[/bold] machine(s) "
+        f"[green]✓[/green] Imported [bold]{len(machines)}[/bold] machine(s) "
         f"from [dim]{src}[/dim]"
     )
