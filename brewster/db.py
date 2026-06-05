@@ -100,6 +100,9 @@ class BrewsterDB:
 
     def close(self) -> None:
         if self._conn:
+            # Checkpoint and truncate the WAL before closing so iCloud/Dropbox
+            # only sees a single clean .db file (no stale -wal/-shm sidecars).
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             self._conn.close()
             self._conn = None
 
