@@ -103,8 +103,20 @@ Override the DB path for a single command with `--db-path PATH` or `BREWSTER_DB_
 
 - Each machine runs `brewster sync`, which calls `brew list --versions` + `brew list --cask --versions` and writes the results to the SQLite DB.
 - The DB file is stored in your cloud sync folder. Each machine writes only its own rows (scoped by hostname), so concurrent writes are safe.
-- WAL journal mode is enabled so interrupted syncs don't corrupt the file.
+- WAL journal mode is enabled so interrupted syncs don't corrupt the file. The WAL is fully checkpointed on every close so no sidecar `-wal`/`-shm` files are left for the sync provider to mishandle.
 - `brewster diff` and `brewster install-missing` read the DB directly — they work as long as your sync provider has delivered the latest version.
+
+## Cloud Sync Conflict Files
+
+If two machines sync at almost exactly the same time before iCloud (or Dropbox, etc.) has delivered the latest DB, the sync provider may create a conflict copy — e.g. `brewster (MacBook's conflicted copy).db`. Brewster won't see this file automatically.
+
+If you notice a machine's data is missing after a sync, check your sync folder for conflict copies and recover with:
+
+```bash
+brewster import ~/Library/Mobile\ Documents/com~apple~CloudDocs/Brewster/"brewster (MacBook's conflicted copy).db"
+```
+
+This merges the conflict copy's data into your live DB. In practice this is rare — it only occurs if both machines happen to sync within the same narrow window before the provider delivers the updated file.
 
 ## License
 
