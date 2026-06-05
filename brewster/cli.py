@@ -700,11 +700,10 @@ def install_missing(
         progress_callback=_on_progress,
     )
 
-    installed_names = [n for n, _ in result.succeeded] if hasattr(result, "succeeded") else []
     log.info(
         "install-missing: installed %d package(s) from %s: %s",
         len(result.succeeded), source_label,
-        ", ".join(n for n, _ in result.succeeded) or "none",
+        ", ".join(result.succeeded) or "none",
     )
 
     console.print()
