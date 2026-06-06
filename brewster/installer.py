@@ -39,7 +39,9 @@ def _install_one(package: PackageRow, cask: bool = False, dry_run: bool = False)
 
     cmd = ["brew", "install"]
     if cask:
-        cmd.append("--cask")
+        # --adopt registers pre-existing apps (installed outside Homebrew) into
+        # Homebrew's tracking so they appear in `brew list --cask` afterward.
+        cmd.extend(["--cask", "--adopt"])
 
     # If the package comes from a non-core tap, pass the fully-qualified name
     # so brew doesn't have to search across taps.
