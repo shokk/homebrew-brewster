@@ -718,6 +718,25 @@ def install_missing(
         for name, err in result.failed:
             console.print(f"    [bold]{name}[/bold]: {err}")
 
+    # Re-sync this machine's DB so subsequent install-missing calls reflect
+    # the newly installed packages and don't repeat the same installs.
+    if result.succeeded:
+        from .sync import sync_to_db
+        machine_info = MachineInfo(label=label)
+        db_resync = BrewsterDB(db_path_for_machine(databases_dir, hostname))
+        db_resync.open()
+        mid = db_resync.upsert_machine(
+            hostname=machine_info.hostname,
+            label=machine_info.label,
+            platform=machine_info.platform,
+            macos_version=machine_info.macos_version,
+            brew_prefix=machine_info.brew_prefix,
+        )
+        console.print("[dim]Updating local DB…[/dim]")
+        sync_to_db(db_resync, mid, quiet=True, resolve_taps=False)
+        db_resync.close()
+        log.info("install-missing: re-synced %s after install", hostname)
+
 
 # ---------------------------------------------------------------------------
 # status
