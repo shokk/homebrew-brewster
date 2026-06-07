@@ -59,14 +59,25 @@ def _brew_list_casks() -> list[dict]:
     """
     Parse `brew list --cask --versions` output.
     Each line: "cask_name version"
-    """
-    try:
-        raw = _run(["brew", "list", "--cask", "--versions"])
-    except RuntimeError as exc:
-        # No casks installed returns exit 0 on modern brew, but guard anyway.
-        log.debug("brew list --cask returned error (possibly no casks): %s", exc)
-        return []
 
+    brew can exit non-zero on some systems (e.g. due to broken receipts or
+    warnings) even when it successfully printed the cask list to stdout.
+    We use stdout regardless, and log stderr at WARNING so problems are visible.
+    """
+    result = subprocess.run(
+        ["brew", "list", "--cask", "--versions"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        stderr_msg = result.stderr.strip()
+        if stderr_msg:
+            log.warning("brew list --cask --versions exited %d: %s", result.returncode, stderr_msg)
+        else:
+            log.warning("brew list --cask --versions exited %d (no stderr)", result.returncode)
+
+    raw = result.stdout
     casks = []
     for line in raw.splitlines():
         parts = line.strip().split()
