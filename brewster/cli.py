@@ -55,8 +55,8 @@ from .diff import compute_diff, DiffResult, PackageRow
 from .installer import install_packages
 from .machine import MachineInfo, assert_brew_available
 
-console = Console()
-err_console = Console(stderr=True)
+console = Console(highlight=False)
+err_console = Console(stderr=True, highlight=False)
 
 logging.basicConfig(
     level=logging.WARNING,
