@@ -60,9 +60,10 @@ def _brew_list_casks() -> list[dict]:
     Parse `brew list --cask --versions` output.
     Each line: "cask_name version"
 
-    brew can exit non-zero on some systems (e.g. due to broken receipts or
-    warnings) even when it successfully printed the cask list to stdout.
-    We use stdout regardless, and log stderr at WARNING so problems are visible.
+    brew exits non-zero (and writes nothing to stdout) when a cask receipt is
+    broken or has been renamed. In that case we fall back to `brew list --cask`
+    (no --versions), which skips the receipt-lookup path and returns names only.
+    Versions are "unknown" in the fallback, but at least the casks are tracked.
     """
     result = subprocess.run(
         ["brew", "list", "--cask", "--versions"],
@@ -70,21 +71,48 @@ def _brew_list_casks() -> list[dict]:
         text=True,
         timeout=60,
     )
+
+    raw = result.stdout.strip()
+
     if result.returncode != 0:
         stderr_msg = result.stderr.strip()
-        if stderr_msg:
-            log.warning("brew list --cask --versions exited %d: %s", result.returncode, stderr_msg)
-        else:
-            log.warning("brew list --cask --versions exited %d (no stderr)", result.returncode)
+        log.warning(
+            "brew list --cask --versions exited %d: %s",
+            result.returncode,
+            stderr_msg or "(no stderr)",
+        )
 
-    raw = result.stdout
+        if not raw:
+            # stdout was empty — broken receipt aborted the command entirely.
+            # Fall back to the simpler form that lists names without versions.
+            log.warning(
+                "Falling back to `brew list --cask` (no versions) due to the error above."
+            )
+            fallback = subprocess.run(
+                ["brew", "list", "--cask"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if fallback.returncode != 0:
+                log.warning(
+                    "brew list --cask also failed (exit %d): %s",
+                    fallback.returncode,
+                    fallback.stderr.strip(),
+                )
+                return []
+            return [
+                {"name": line.strip(), "version": "unknown"}
+                for line in fallback.stdout.splitlines()
+                if line.strip()
+            ]
+
     casks = []
     for line in raw.splitlines():
         parts = line.strip().split()
         if len(parts) >= 2:
             casks.append({"name": parts[0], "version": parts[-1]})
         elif len(parts) == 1:
-            # Cask installed but version unknown
             casks.append({"name": parts[0], "version": "unknown"})
     log.debug("Found %d casks", len(casks))
     return casks
